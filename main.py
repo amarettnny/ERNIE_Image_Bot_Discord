@@ -19,7 +19,7 @@ OWNER_IDS = [i.strip() for i in raw_owners.split(",") if i.strip()]
 # 2. 常量配置
 API_URL = "https://aistudio.baidu.com/llm/lmapi/v3/images/generations"
 EMOJI_NAME = "ERNIE_ThumbsUp" 
-TARGET_CHANNEL_NAME = "ernie-image-creator-hub"
+TARGET_CHANNEL_NAME = "🎨｜ernie-image-creator-hub"
 
 RATIO_MAP = {
     "1:1": "1024x1024", "16:9": "1024x576", "9:16": "576x1024",
