@@ -1,74 +1,59 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import requests
 import base64
+import os
 from io import BytesIO
+from datetime import datetime, time, timedelta
+from dotenv import load_dotenv
 import database
-from openai import OpenAI
+
+# 1. 加载配置
+load_dotenv()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+# 处理多管理员列表
+raw_owners = os.getenv("OWNER_IDS", "")
+OWNER_IDS = [i.strip() for i in raw_owners.split(",") if i.strip()]
+
+# 2. 常量配置
+API_URL = "https://aistudio.baidu.com/llm/lmapi/v3/images/generations"
+EMOJI_NAME = "ERNIE_ThumbsUp" 
+TARGET_CHANNEL_NAME = "ernie-image-creator-hub"
 
 RATIO_MAP = {
-    "1:1": "1024x1024",
-    "16:9": "1024x576",
-    "9:16": "576x1024",
-    "4:3": "1024x768",
-    "3:4": "768x1024",
+    "1:1": "1024x1024", "16:9": "1024x576", "9:16": "576x1024",
+    "4:3": "1024x768", "3:4": "768x1024",
 }
 
-API_URL = "https://aistudio.baidu.com/llm/lmapi/v3/images/generations"
-EMOJI_NAME = "ERNIE_ThumbsUp"  # must match your server's custom emoji name exactly
-
-
-class Bot(commands.Bot):
+class ErnieBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.default())
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.reactions = True
+        intents.members = True
+        super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         database.init_db()
         await self.tree.sync()
+        print(f"Bot is ready. Slash commands synced.")
 
+    
+bot = ErnieBot()
 
-bot = Bot()
-
-
-# ── /config ──
-
-@bot.tree.command(name="config", description="[Admin] Set the server's Baidu AI Studio access token")
-@app_commands.default_permissions(administrator=True)
-async def config(interaction: discord.Interaction, token: str):
-    database.set_token(token)
-    await interaction.response.send_message("Global token saved.", ephemeral=True)
-
-
-# ── /imagine ──
-
-@bot.tree.command(name="imagine", description="Generate an image with ERNIE")
-@app_commands.describe(prompt="Image prompt", ratio="Aspect ratio")
-@app_commands.choices(ratio=[
-    app_commands.Choice(name="1:1", value="1:1"),
-    app_commands.Choice(name="16:9", value="16:9"),
-    app_commands.Choice(name="9:16", value="9:16"),
-    app_commands.Choice(name="4:3", value="4:3"),
-    app_commands.Choice(name="3:4", value="3:4"),
-])
+# ── /imagine: 生图并存入数据库 ──
+@bot.tree.command(name="imagine", description="Generate an image with ERNIE-Image 8B")
+@app_commands.describe(prompt="What do you want to see?", ratio="Aspect ratio")
+@app_commands.choices(ratio=[app_commands.Choice(name=k, value=k) for k in RATIO_MAP.keys()])
 async def imagine(interaction: discord.Interaction, prompt: str, ratio: str = "1:1"):
     await interaction.response.defer()
 
-    uid = str(interaction.user.id)
     token = database.get_token()
     if not token:
-        await interaction.followup.send("No token configured yet. Ask an admin to run `/config`.")
+        await interaction.followup.send("Error: Access Token not found.", ephemeral=True)
         return
 
-    database.ensure_user(uid)
-
-    channel_name = interaction.channel.name
-
-    # check daily limit before calling API
-    is_daily = channel_name == "daily-showcase"
-    already_checked_in = is_daily and database.has_daily_checkin(uid)
-
-    # call Baidu API
     headers = {"Authorization": f"bearer {token}", "Content-Type": "application/json"}
     payload = {
         "model": "ernie-image-turbo",
@@ -76,107 +61,77 @@ async def imagine(interaction: discord.Interaction, prompt: str, ratio: str = "1
         "n": 1,
         "response_format": "b64_json",
         "size": RATIO_MAP.get(ratio, "1024x1024"),
-        "seed": 42,
-        "use_pe": True,
-        "num_inference_steps": 8,
-        "guidance_scale": 1.0
+        "use_pe": True
     }
-    res = requests.post(API_URL, json=payload, headers=headers, timeout=60).json()
-    print(f"[API] user={uid} prompt={prompt} response={res}")
+    
+    try:
+        res = requests.post(API_URL, json=payload, headers=headers, timeout=60).json()
+        if "data" not in res:
+            raise Exception(res.get("error", {}).get("message", "API Error"))
 
-    if "data" not in res:
-        error_msg = res.get("error", {}).get("message", "Unknown error")
-        await interaction.followup.send(f"Image generation failed: {error_msg}")
-        return
+        img_data = base64.b64decode(res["data"][0]["b64_json"])
+        msg = await interaction.followup.send(
+            content=f"🎨 **Prompt:** {prompt}",
+            file=discord.File(fp=BytesIO(img_data), filename="ernie.png"),
+            wait=True,
+        )
+        
+        # 核心：必须存入数据库，否则 gallery 读不到
+        database.add_generation(str(msg.id), str(interaction.user.id), interaction.channel.name, prompt)
+        
+    except Exception as e:
+        await interaction.followup.send(f"Failed: {str(e)}")
 
-    img_data = base64.b64decode(res["data"][0]["b64_json"])
-
-    # send image
-    msg = await interaction.followup.send(
-        content=f"**Prompt:** {prompt}",
-        file=discord.File(fp=BytesIO(img_data), filename="ernie.png"),
-        wait=True,
-    )
-
-    # record generation (daily-showcase or theme-battle or other)
-    database.add_generation(str(msg.id), uid, channel_name, prompt)
-
-    # award daily check-in points (first /imagine in #daily-showcase per day)
-    if is_daily and not already_checked_in:
-        database.add_points(uid, 5)
-        await interaction.followup.send("Daily check-in! +5 points", ephemeral=True)
-
-
-# ── /checkin ──
-
-@bot.tree.command(name="checkin", description="Check your current points")
-async def checkin(interaction: discord.Interaction):
-    pts = database.get_points(str(interaction.user.id))
-    await interaction.response.send_message(f"Your points: **{pts}**", ephemeral=True)
-
-
-# ── /gallery ──
-
-@bot.tree.command(name="gallery", description="Top daily-showcase creations by popularity")
+# ── /gallery: 用户隐身查看实时排名 ──
+@bot.tree.command(name="gallery", description="Check real-time top 10 (Only you can see this)")
 async def gallery(interaction: discord.Interaction):
-    rows = database.get_gallery()
-    if not rows:
-        await interaction.response.send_message("No gallery entries yet.")
+    top_works, mode_name = database.get_dynamic_gallery()
+    
+    if not top_works or mode_name == "No Data":
+        await interaction.response.send_message("The gallery is empty right now!", ephemeral=True)
         return
-    lines = [
-        f"**#{i}** <@{uid}> — {prompt} (:ERNIE_ThumbsUp: {reactions})"
-        for i, (uid, prompt, reactions, _mid) in enumerate(rows, 1)
-    ]
-    await interaction.response.send_message("\n".join(lines))
 
+    embed = discord.Embed(title=f"📊 Current Rankings: {mode_name}", color=0x00ffcc)
+    embed.set_footer(text="Keep clapping for your favorites! Final winners announced Monday.")
 
-# ── /leaderboard ──
+    for i, (uid, prompt, votes) in enumerate(top_works, 1):
+        embed.add_field(
+            name=f"Rank #{i} | {votes} :{EMOJI_NAME}:",
+            value=f"Artist: <@{uid}>\nPrompt: *{prompt[:60]}...*",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="leaderboard", description="This week's theme-battle rankings")
-async def leaderboard(interaction: discord.Interaction):
-    rows = database.get_leaderboard()
-    if not rows:
-        await interaction.response.send_message("No entries this week.")
+# ── /config: 只有 OWNER_IDS 里的用户能执行 ──
+@bot.tree.command(name="config", description="[Owner Only] Update Access Token")
+async def config(interaction: discord.Interaction, token: str):
+    if str(interaction.user.id) not in OWNER_IDS:
+        await interaction.response.send_message("Denied: Owner whitelist only.", ephemeral=True)
         return
-    lines = [
-        f"**#{i}** <@{uid}> — {prompt} (:ERNIE_ThumbsUp: {reactions})"
-        for i, (uid, prompt, reactions, _mid) in enumerate(rows, 1)
-    ]
-    await interaction.response.send_message("\n".join(lines))
 
+    database.set_token(token)
+    await interaction.response.send_message("Token saved (Database updated).", ephemeral=True)
 
-# ── Reaction listener ──
+# ── 自动同步点赞数逻辑 ──
+async def sync_reactions(payload):
+    # 如果表情名字匹配，抓取最新数量更新数据库
+    if payload.emoji.name == EMOJI_NAME:
+        channel = bot.get_channel(payload.channel_id)
+        msg = await channel.fetch_message(payload.message_id)
+        count = next((r.count for r in msg.reactions if getattr(r.emoji, 'name', '') == EMOJI_NAME), 0)
+        database.update_reactions(str(payload.message_id), count)
 
 @bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.emoji.name != EMOJI_NAME:
-        return
+async def on_raw_reaction_add(payload):
+    await sync_reactions(payload)
 
-    gen = database.get_generation(str(payload.message_id))
-    if not gen:
-        return
+@bot.event
+async def on_raw_reaction_remove(payload):
+    await sync_reactions(payload)
 
-    author_uid, channel, bonus_awarded = gen
-
-    # ignore self-reactions
-    if str(payload.user_id) == author_uid:
-        return
-
-    # fetch actual reaction count from Discord
-    ch = bot.get_channel(payload.channel_id)
-    msg = await ch.fetch_message(payload.message_id)
-    count = 0
-    for r in msg.reactions:
-        if hasattr(r.emoji, "name") and r.emoji.name == EMOJI_NAME:
-            count = r.count
-            break
-
-    database.update_reactions(str(payload.message_id), count)
-
-    # +2 bonus when daily-showcase post hits 3 reactions
-    if channel == "daily-showcase" and count >= 3 and not bonus_awarded:
-        database.add_points(author_uid, 2)
-        database.mark_bonus(str(payload.message_id))
-
-
-bot.run("replace with discord bot token")
+# 启动
+if DISCORD_TOKEN:
+    bot.run(DISCORD_TOKEN)
+else:
+    print("CRITICAL: DISCORD_TOKEN not found in .env!")
