@@ -11,17 +11,17 @@ DB_FILE = "bot.db"
 def init_db():
     """初始化数据库表结构"""
     with sqlite3.connect(DB_FILE) as conn:
-        # 1. 存储 token 等全局设置
+        # 存储 token 全局设置
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings "
             "(key TEXT PRIMARY KEY, value TEXT)"
         )
-        # 2. 存储用户基础信息（如需扩展积分系统可用）
+        # 存储用户基础信息
         conn.execute(
             "CREATE TABLE IF NOT EXISTS users "
             "(user_id TEXT PRIMARY KEY, points INTEGER DEFAULT 0)"
         )
-        # 3. 核心表：存储每一张生成的图片信息及点赞数
+        # 存储每一张生成的图片信息及点赞数
         conn.execute(
             "CREATE TABLE IF NOT EXISTS generations "
             "(message_id TEXT PRIMARY KEY, user_id TEXT, channel TEXT, "
@@ -30,16 +30,16 @@ def init_db():
         )
     print("✅ Database initialized.")
 
-# ── Token 管理逻辑 ──
+# ── Token 管理 ──
 
 def get_token():
-    """获取百度 API Token：优先从环境变量读取，其次从数据库读取"""
+    """获取 API Token (优先从环境变量读取，其次从数据库读取)"""
     # 优先读取 .env 中的 BAIDU_TOKEN
     env_token = os.getenv("BAIDU_TOKEN")
     if env_token:
         return env_token
     
-    # 备选：从数据库 settings 表读取
+    # 从数据库 settings 表读取
     with sqlite3.connect(DB_FILE) as conn:
         row = conn.execute("SELECT value FROM settings WHERE key='token'").fetchone()
         return row[0] if row else None
@@ -68,7 +68,7 @@ def add_generation(message_id: str, uid: str, channel: str, prompt: str):
         )
 
 def get_generation(message_id: str):
-    """根据消息 ID 获取生成详情（用于 Reaction 监听）"""
+    """根据消息 ID 获取生成详情"""
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
             "SELECT user_id, channel, bonus_awarded FROM generations WHERE message_id=?",
@@ -88,7 +88,7 @@ def update_reactions(message_id: str, count: int):
 def get_dynamic_gallery(limit: int = 10):
     """
     动态获取 Top 10 作品：
-    1. 优先尝试获取本周（周一 00:00 至今）在 #ernie-image 频道的数据。
+    1. 优先尝试获取本周（周一 00:00 至今）的数据。
     2. 如果本周没有数据，则返回全时段最高点赞的数据。
     """
     now = datetime.utcnow()
@@ -97,7 +97,7 @@ def get_dynamic_gallery(limit: int = 10):
     monday_str = monday.isoformat()
 
     with sqlite3.connect(DB_FILE) as conn:
-        # 1. 尝试查询本周数据
+        # 尝试查询本周数据
         current_week = conn.execute(
             "SELECT user_id, prompt, reactions FROM generations "
             "WHERE channel='ernie-image' AND created_at >= ? "
@@ -108,7 +108,7 @@ def get_dynamic_gallery(limit: int = 10):
         if current_week and any(row[2] > 0 for row in current_week):
             return current_week, "Current Week (In Progress)"
 
-        # 2. 兜底：查询全时段数据（Hall of Fame）
+        # backup：查询全时段数据（Hall of Fame）
         all_time = conn.execute(
             "SELECT user_id, prompt, reactions FROM generations "
             "WHERE channel='ernie-image' "
@@ -121,7 +121,7 @@ def get_dynamic_gallery(limit: int = 10):
         
         return [], "No Data"
 
-# ── 积分/检查逻辑 (保留作为可选功能) ──
+# ── 积分/检查逻辑 (保留功能) ──
 
 def add_points(uid: str, pts: int):
     with sqlite3.connect(DB_FILE) as conn:
