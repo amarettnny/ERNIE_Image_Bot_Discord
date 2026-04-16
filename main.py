@@ -9,14 +9,14 @@ from datetime import datetime, time, timedelta
 from dotenv import load_dotenv
 import database
 
-# 1. 加载配置
+# 加载配置
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-# 处理多管理员列表
+# 多管理员列表
 raw_owners = os.getenv("OWNER_IDS", "")
 OWNER_IDS = [i.strip() for i in raw_owners.split(",") if i.strip()]
 
-# 2. 常量配置
+# 环境常量
 API_URL = "https://aistudio.baidu.com/llm/lmapi/v3/images/generations"
 EMOJI_NAME = "ERNIE_ThumbsUp" 
 TARGET_CHANNEL_NAME = "🎨｜ernie-image-creator-hub"
@@ -76,7 +76,7 @@ async def imagine(interaction: discord.Interaction, prompt: str, ratio: str = "1
             wait=True,
         )
         
-        # 核心：必须存入数据库，否则 gallery 读不到
+        # 存入数据库，否则 gallery 读不到
         database.add_generation(str(msg.id), str(interaction.user.id), interaction.channel.name, prompt)
         
     except Exception as e:
