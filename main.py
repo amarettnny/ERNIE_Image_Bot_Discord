@@ -19,7 +19,7 @@ OWNER_IDS = [i.strip() for i in raw_owners.split(",") if i.strip()]
 # 环境常量
 API_URL = "https://aistudio.baidu.com/llm/lmapi/v3/images/generations"
 EMOJI_NAME = "ERNIE_ThumbsUp" 
-TARGET_CHANNEL_NAME = "🎨｜ernie-image-creator-hub"
+TARGET_CHANNEL_ID = "1493632266125967614"
 
 RATIO_MAP = {
     "1:1": "1024x1024", "16:9": "1024x576", "9:16": "576x1024",
@@ -38,6 +38,20 @@ class ErnieBot(commands.Bot):
         database.init_db()
         await self.tree.sync()
         print(f"Bot is ready. Slash commands synced.")
+
+class PromptDetailView(discord.ui.View):
+    # 允许用户查看PE版本的提示词，使用私密消息避免刷屏
+    def __init__(self, pe_prompt: str):
+        super().__init__(timeout=None) 
+        self.pe_prompt = pe_prompt
+
+    @discord.ui.button(label="Show Prompt After Revised", style=discord.ButtonStyle.secondary, emoji="🪄")
+    async def show_pe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # ephemeral=True，这样只有点击按钮的人能看到
+        await interaction.response.send_message(
+            f"🪄 **Prompt After Revised:**\n```\n{self.pe_prompt}\n```", 
+            ephemeral=True
+        )
 
     
 bot = ErnieBot()
@@ -66,26 +80,31 @@ async def imagine(interaction: discord.Interaction, prompt: str, ratio: str = "1
     
     try:
         res = requests.post(API_URL, json=payload, headers=headers, timeout=60).json()
+        print(f"DEBUG - API Response: {res}")
         if "data" not in res:
             raise Exception(res.get("error", {}).get("message", "API Error"))
 
         img_data = base64.b64decode(res["data"][0]["b64_json"])
+
+        pe_prompt = res.get("revised_prompt") or res["data"][0].get("revised_prompt") or "PE Prompt not returned by API."
+
+        view = PromptDetailView(pe_prompt)
         msg = await interaction.followup.send(
             content=f"🎨 **Prompt:** {prompt}",
             file=discord.File(fp=BytesIO(img_data), filename="ernie.png"),
+            view=view,
             wait=True,
         )
         
         # 存入数据库，否则 gallery 读不到
-        database.add_generation(str(msg.id), str(interaction.user.id), interaction.channel.name, prompt)
-        
+        database.add_generation(str(msg.id), str(interaction.user.id), str(interaction.channel.id), prompt) # 记录在生成所在频道     
     except Exception as e:
         await interaction.followup.send(f"Failed: {str(e)}")
 
 # ── /gallery: 用户隐身查看实时排名 ──
 @bot.tree.command(name="gallery", description="Check real-time top 10 (Only you can see this)")
 async def gallery(interaction: discord.Interaction):
-    top_works, mode_name = database.get_dynamic_gallery()
+    top_works, mode_name = database.get_dynamic_gallery(TARGET_CHANNEL_ID)
     
     if not top_works or mode_name == "No Data":
         await interaction.response.send_message("The gallery is empty right now!", ephemeral=True)
@@ -115,7 +134,9 @@ async def config(interaction: discord.Interaction, token: str):
 
 # ── 自动同步点赞数逻辑 ──
 async def sync_reactions(payload):
-    # 如果表情名字匹配，抓取最新数量更新数据库
+    if str(payload.channel_id) != TARGET_CHANNEL_ID:
+        return
+
     if payload.emoji.name == EMOJI_NAME:
         channel = bot.get_channel(payload.channel_id)
         msg = await channel.fetch_message(payload.message_id)

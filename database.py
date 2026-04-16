@@ -85,41 +85,34 @@ def update_reactions(message_id: str, count: int):
 
 # ── 动态排行榜查询 (核心) ──
 
-def get_dynamic_gallery(limit: int = 10):
-    """
-    动态获取 Top 10 作品：
-    1. 优先尝试获取本周（周一 00:00 至今）的数据。
-    2. 如果本周没有数据，则返回全时段最高点赞的数据。
-    """
+# 修改这个函数，让它接受 target_channel_id 
+def get_dynamic_gallery(target_channel_id: str, limit: int = 10):
     now = datetime.utcnow()
-    # 计算本周一 00:00:00 的 ISO 时间戳
+    # 获取本周一 00:00:00
     monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     monday_str = monday.isoformat()
 
     with sqlite3.connect(DB_FILE) as conn:
-        # 尝试查询本周数据
+        # 核心改动：WHERE channel = ? (这里的问号会匹配传入的数字 ID)
         current_week = conn.execute(
             "SELECT user_id, prompt, reactions FROM generations "
-            "WHERE channel='ernie-image' AND created_at >= ? "
+            "WHERE channel = ? AND created_at >= ? "
             "ORDER BY reactions DESC LIMIT ?",
-            (monday_str, limit),
+            (target_channel_id, monday_str, limit),
         ).fetchall()
         
-        if current_week and any(row[2] > 0 for row in current_week):
+        if current_week:
             return current_week, "Current Week (In Progress)"
 
-        # backup：查询全时段数据（Hall of Fame）
+        # 兜底逻辑也一样
         all_time = conn.execute(
             "SELECT user_id, prompt, reactions FROM generations "
-            "WHERE channel='ernie-image' "
+            "WHERE channel = ? "
             "ORDER BY reactions DESC LIMIT ?",
-            (limit,),
+            (target_channel_id, limit),
         ).fetchall()
         
-        if all_time:
-            return all_time, "All-Time Hall of Fame"
-        
-        return [], "No Data"
+        return all_time, "All-Time Hall of Fame" if all_time else "No Data"
 
 # ── 积分/检查逻辑 (保留功能) ──
 
